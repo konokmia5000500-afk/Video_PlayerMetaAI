@@ -25,7 +25,7 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Prepare MaxPlayer project
+      - name: Prepare clean Flutter project
         id: prep
         run: |
           set -e
@@ -43,45 +43,49 @@ jobs:
 
           FLUTTER_DIR=$(dirname "$PUBSPEC_FILE")
           echo "flutter_dir=$FLUTTER_DIR" >> "$GITHUB_OUTPUT"
-          echo "Using Flutter project directory: $FLUTTER_DIR"
 
-          # Remove duplicate suffixed files like *_1.dart, *_2.dart, *_1_1.yaml, etc.
+          # Remove duplicate suffixed files (*_1.*, *_2.*, *_1_1.*, etc.)
           find "$FLUTTER_DIR" -type f -regextype posix-extended \
             -regex '.*_(1|2|1_1|2_1)\.(dart|yaml|kts|xml|md|png)$' -delete
 
-          if [ ! -f "$FLUTTER_DIR/android/gradlew" ]; then
-            flutter create --platforms android --no-overwrite "$FLUTTER_DIR"
+          # Backup existing AndroidManifest.xml and res if present
+          TMP_ANDROID=$(mktemp -d)
+          if [ -f "$FLUTTER_DIR/android/app/src/main/AndroidManifest.xml" ]; then
+            cp "$FLUTTER_DIR/android/app/src/main/AndroidManifest.xml" "$TMP_ANDROID/AndroidManifest.xml"
+          fi
+          if [ -d "$FLUTTER_DIR/android/app/src/main/res" ]; then
+            cp -r "$FLUTTER_DIR/android/app/src/main/res" "$TMP_ANDROID/res"
           fi
 
-          python3 - <<'EOF' "$FLUTTER_DIR/android"
-          import glob, os, re, sys
+          # Recreate clean Android folder with proper AGP & Gradle plugin setup
+          rm -rf "$FLUTTER_DIR/android"
+          flutter create --platforms android "$FLUTTER_DIR"
 
-          android_dir = sys.argv[1]
-          for path in glob.glob(os.path.join(android_dir, "**", "*.gradle.kts"), recursive=True):
-              with open(path, "r", encoding="utf-8") as f:
-                  text = f.read()
-              text = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", r'"\1"', text)
-              text = text.replace("RepositoriesMode.FAIL_ON_PROJECT_REPOS", "RepositoriesMode.PREFER_PROJECT")
-              text = text.replace("RepositoriesMode.PREFER_SETTINGS", "RepositoriesMode.PREFER_PROJECT")
-              with open(path, "w", encoding="utf-8") as f:
-                  f.write(text)
+          if [ -f "$TMP_ANDROID/AndroidManifest.xml" ]; then
+            cp "$TMP_ANDROID/AndroidManifest.xml" "$FLUTTER_DIR/android/app/src/main/AndroidManifest.xml"
+          fi
+          if [ -d "$TMP_ANDROID/res" ]; then
+            cp -r "$TMP_ANDROID/res/." "$FLUTTER_DIR/android/app/src/main/res/"
+          fi
+          rm -rf "$TMP_ANDROID"
+
+          # Ensure single 64-bit ABI (arm64-v8a) in app/build.gradle.kts
+          python3 - <<'EOF' "$FLUTTER_DIR/android/app/build.gradle.kts"
+          import re, sys
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          if "abiFilters" not in content:
+              content = re.sub(
+                  r"(defaultConfig\s*\{)",
+                  r'\1\n        ndk {\n            abiFilters += listOf("arm64-v8a")\n        }',
+                  content,
+                  count=1
+              )
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
           EOF
-
-          mkdir -p "$HOME/.android"
-          for KS in "$FLUTTER_DIR/android/debug.keystore" "$FLUTTER_DIR/android/app/debug.keystore" "$HOME/.android/debug.keystore"; do
-            if [ ! -f "$KS" ]; then
-              keytool -genkeypair \
-                -v \
-                -keystore "$KS" \
-                -storepass android \
-                -alias androiddebugkey \
-                -keypass android \
-                -keyalg RSA \
-                -keysize 2048 \
-                -validity 10000 \
-                -dname "CN=Android Debug,O=Android,C=US"
-            fi
-          done
 
       - name: Build single 64-bit (arm64-v8a) APK
         run: |
