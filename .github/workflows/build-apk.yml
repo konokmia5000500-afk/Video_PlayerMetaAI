@@ -54,13 +54,14 @@ jobs:
           fi
 
           python3 - <<'EOF' "$FLUTTER_DIR/android"
-          import glob, os, re
+          import glob, os, re, sys
 
-          android_dir = sys.argv[1] if "sys" in globals() else __import__("sys").argv[1]
+          android_dir = sys.argv[1]
           for path in glob.glob(os.path.join(android_dir, "**", "*.gradle.kts"), recursive=True):
               with open(path, "r", encoding="utf-8") as f:
                   text = f.read()
               text = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", r'"\1"', text)
+              text = text.replace("RepositoriesMode.FAIL_ON_PROJECT_REPOS", "RepositoriesMode.PREFER_PROJECT")
               text = text.replace("RepositoriesMode.PREFER_SETTINGS", "RepositoriesMode.PREFER_PROJECT")
               with open(path, "w", encoding="utf-8") as f:
                   f.write(text)
