@@ -1,159 +1,97 @@
-name: Build APK - Symphony Innova 10 (arm64)
+name: Build 64-bit Flutter APK
+
 on:
   push:
-    branches: [ main ]
+    branches: [ "**" ]
   workflow_dispatch:
+
 jobs:
-  build-apk:
+  build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Setup Java 17
+
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
-          java-version: '17'
-      - name: Setup Flutter
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.22.0'
-          channel: 'stable'
+          channel: stable
           cache: true
-      - name: Unzip project
+
+      - name: Prepare MaxPlayer project
+        id: prep
         run: |
-          if [ -f MaxPlayer-NO-YML.zip ]; then unzip -o MaxPlayer-NO-YML.zip; fi
-          if [ -f MaxPlayer-NO-YML-FIXED.zip ]; then unzip -o MaxPlayer-NO-YML-FIXED.zip; fi
-          if [ -f MaxPlayer.zip ]; then unzip -o MaxPlayer.zip; fi
-          ls -R | head -n 50
-      - name: FIX v1 embedding + SDK 34
+          set -e
+          for z in *.zip; do
+            if [ -f "$z" ]; then
+              unzip -o "$z" -d extracted_project
+            fi
+          done
+
+          PUBSPEC_FILE=$(find . -maxdepth 4 -name "pubspec.yaml" | head -n 1)
+          if [ -z "$PUBSPEC_FILE" ]; then
+            echo "pubspec.yaml not found!"
+            exit 1
+          fi
+
+          FLUTTER_DIR=$(dirname "$PUBSPEC_FILE")
+          echo "flutter_dir=$FLUTTER_DIR" >> "$GITHUB_OUTPUT"
+          echo "Using Flutter project directory: $FLUTTER_DIR"
+
+          # Remove duplicate suffixed files like *_1.dart, *_2.dart, *_1_1.yaml, etc.
+          find "$FLUTTER_DIR" -type f -regextype posix-extended \
+            -regex '.*_(1|2|1_1|2_1)\.(dart|yaml|kts|xml|md|png)$' -delete
+
+          if [ ! -f "$FLUTTER_DIR/android/gradlew" ]; then
+            flutter create --platforms android --no-overwrite "$FLUTTER_DIR"
+          fi
+
+          python3 - <<'EOF' "$FLUTTER_DIR/android"
+          import glob, os, re
+
+          android_dir = sys.argv[1] if "sys" in globals() else __import__("sys").argv[1]
+          for path in glob.glob(os.path.join(android_dir, "**", "*.gradle.kts"), recursive=True):
+              with open(path, "r", encoding="utf-8") as f:
+                  text = f.read()
+              text = re.sub(r"'([^'\\]*(?:\\.[^'\\]*)*)'", r'"\1"', text)
+              text = text.replace("RepositoriesMode.PREFER_SETTINGS", "RepositoriesMode.PREFER_PROJECT")
+              with open(path, "w", encoding="utf-8") as f:
+                  f.write(text)
+          EOF
+
+          mkdir -p "$HOME/.android"
+          for KS in "$FLUTTER_DIR/android/debug.keystore" "$FLUTTER_DIR/android/app/debug.keystore" "$HOME/.android/debug.keystore"; do
+            if [ ! -f "$KS" ]; then
+              keytool -genkeypair \
+                -v \
+                -keystore "$KS" \
+                -storepass android \
+                -alias androiddebugkey \
+                -keypass android \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -dname "CN=Android Debug,O=Android,C=US"
+            fi
+          done
+
+      - name: Build single 64-bit (arm64-v8a) APK
         run: |
-          cd MaxPlayer || cd .
-          rm -rf android
-          flutter create --org com.maxplayer --project-name max_player_clone --platforms android .
-          MAIN=$(find android/app/src/main -name "MainActivity.kt" | head -n 1)
-          PKG=$(echo "$MAIN" | sed 's|android/app/src/main/kotlin/||; s|/MainActivity.kt||; s|/|.|g')
-          printf 'package %s\nimport io.flutter.embedding.android.FlutterActivity\nclass MainActivity : FlutterActivity()\n' "$PKG" > "$MAIN"
-          cat > android/app/src/main/AndroidManifest.xml <<'XML'
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-            <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
-            <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
-            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
-            <uses-permission android:name="android.permission.WAKE_LOCK"/>
-            <application android:label="Max Player" android:name="${applicationName}" android:icon="@mipmap/ic_launcher">
-              <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:theme="@style/LaunchTheme" android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode" android:hardwareAccelerated="true">
-                <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme"/>
-                <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
-              </activity>
-              <meta-data android:name="flutterEmbedding" android:value="2"/>
-            </application>
-          </manifest>
-          XML
-          rm -f android/app/build.gradle.kts android/settings.gradle.kts android/build.gradle.kts
-          cat > android/app/build.gradle <<'GRADLE'
-          plugins { id "com.android.application"; id "kotlin-android"; id "dev.flutter.flutter-gradle-plugin" }
-          android {
-              namespace = "com.maxplayer.max_player_clone"
-              compileSdk 34
-              ndkVersion "25.1.8937393"
-              defaultConfig {
-                  applicationId "com.maxplayer.max_player_clone"
-                  minSdk 21
-                  targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
-                  ndk { abiFilters "arm64-v8a" }
-              }
-              buildTypes { release { signingConfig signingConfigs.debug } }
-          }
-          flutter { source "../.." }
-          GRADLE
-      - name: REPLACE media_kit with video_player - no SDK 36, no dead jar
-        run: |
-          cd MaxPlayer || cd .
-          sed -i "/media_kit/d" lib/main.dart; sed -i "s/MediaKit.ensureInitialized();//" lib/main.dart; grep -n media_kit lib/main.dart || echo NO_MEDIA_KIT_IN_MAIN
-          cat > pubspec.yaml <<'YAML'
-          name: max_player_clone
-          description: Fast Video Player
-          version: 1.0.0+1
-          environment:
-            sdk: '>=3.2.0 <4.0.0'
-          dependencies:
-            flutter:
-              sdk: flutter
-            video_player: ^2.9.5
-            permission_handler: ^11.3.1
-            shared_preferences: ^2.2.2
-            provider: ^6.1.2
-            screen_brightness: ^0.2.2
-            wakelock_plus: ^1.2.6
-            path: ^1.9.0
-          flutter:
-            uses-material-design: true
-            assets:
-              - assets/logo.png
-          YAML
-          cat > lib/screens/player_screen.dart <<'DART'
-          import 'dart:async';
-          import 'dart:io';
-          import 'package:flutter/material.dart';
-          import 'package:flutter/services.dart';
-          import 'package:video_player/video_player.dart';
-          import 'package:provider/provider.dart';
-          import 'package:screen_brightness/screen_brightness.dart';
-          import '../models/media_item.dart';
-          import '../services/settings_service.dart';
-          class PlayerScreen extends StatefulWidget {
-            final MediaItem item; final List<MediaItem> queue;
-            const PlayerScreen({super.key, required this.item, required this.queue});
-            @override State<PlayerScreen> createState() => _PlayerScreenState();
-          }
-          class _PlayerScreenState extends State<PlayerScreen> {
-            VideoPlayerController? controller;
-            bool showUI = true; bool audioOnly = false; bool locked = false;
-            double brightness = 0.5; double volume = 1; String seekLabel = '';
-            Timer? hideTimer; Timer? seekTimer; Timer? posTimer;
-            double dragStartY = 0; bool isLeftDrag = false;
-            late MediaItem current; bool initializing = true;
-            @override void initState() { super.initState(); current = widget.item; _open(current); _hideAfter(); posTimer = Timer.periodic(const Duration(milliseconds: 500), (_) { if (mounted) setState(() {}); }); }
-            Future<void> _open(MediaItem it) async {
-              final s = context.read<AppSettings>();
-              s.lastPath = it.path; s.lastIsAudio = it.isAudio; await s.save();
-              await controller?.pause(); await controller?.dispose();
-              final c = VideoPlayerController.file(File(it.path));
-              setState(() { controller = c; current = it; initializing = true; });
-              try { await c.initialize(); if (s.resumePlayback && s.lastPositionMs > 0 && it.path == widget.item.path) { await c.seekTo(Duration(milliseconds: s.lastPositionMs)); } await c.play(); } catch (_) {}
-              if (mounted) setState(() => initializing = false);
-              c.addListener(() { if (!mounted) return; if (c.value.hasError) return; if (c.value.isInitialized && c.value.duration != Duration.zero && c.value.position >= c.value.duration) { final st = context.read<AppSettings>(); if (st.autoPlayNext) _next(); } });
-            }
-            void _hideAfter() { hideTimer?.cancel(); hideTimer = Timer(const Duration(seconds: 3), () { if (mounted) setState(() => showUI = false); }); }
-            void _toggle() { setState(() => showUI = !showUI); if (showUI) _hideAfter(); }
-            Future<void> _fastSeek(int sec) async { final c = controller; if (c == null || !c.value.isInitialized) return; var target = c.value.position + Duration(seconds: sec); if (target < Duration.zero) target = Duration.zero; if (target > c.value.duration) target = c.value.duration; await c.seekTo(target); setState(() => seekLabel = '${sec > 0 ? '+' : ''}$sec s'); seekTimer?.cancel(); seekTimer = Timer(const Duration(milliseconds: 800), () { if (mounted) setState(() => seekLabel = ''); }); }
-            void _onDoubleTap(TapDownDetails d, bool isRight) { final size = MediaQuery.of(context).size; final y = d.globalPosition.dy; final x = d.globalPosition.dx; if (y < size.height * 0.28 || y > size.height * 0.72) return; if (x < 60 || x > size.width - 60) return; final s = context.read<AppSettings>(); if (!s.doubleTapSeek) return; _fastSeek(isRight ? s.seekSeconds : -s.seekSeconds); }
-            void _onDragStart(DragStartDetails d) { dragStartY = d.globalPosition.dy; isLeftDrag = d.globalPosition.dx < MediaQuery.of(context).size.width / 2; }
-            Future<void> _onDragUpdate(DragUpdateDetails d) async { final s = context.read<AppSettings>(); if (isLeftDrag && !s.swipeBrightness) return; if (!isLeftDrag && !s.swipeVolume) return; final delta = (dragStartY - d.globalPosition.dy) / 300; if (isLeftDrag) { brightness = (brightness + delta).clamp(0.05, 1.0); await ScreenBrightness().setScreenBrightness(brightness); } else { volume = (volume + delta).clamp(0, 1); await controller?.setVolume(volume); } setState(() {}); }
-            @override void dispose() { final st = context.read<AppSettings>(); if (controller != null) st.lastPositionMs = controller!.value.position.inMilliseconds; st.save(); controller?.dispose(); hideTimer?.cancel(); seekTimer?.cancel(); posTimer?.cancel(); SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp, DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]); super.dispose(); }
-            String _fmt(Duration d) => '${d.inMinutes}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
-            void _prev() { final idx = widget.queue.indexWhere((e) => e.path == current.path); if (idx > 0) _open(widget.queue[idx - 1]); }
-            void _next() { final idx = widget.queue.indexWhere((e) => e.path == current.path); if (idx >= 0 && idx < widget.queue.length - 1) _open(widget.queue[idx + 1]); }
-            @override Widget build(BuildContext context) { final s = context.watch<AppSettings>(); final c = controller; final pos = c?.value.position ?? Duration.zero; final dur = c?.value.duration ?? Duration.zero; final playing = c?.value.isPlaying ?? false; return Scaffold(backgroundColor: Colors.black, body: GestureDetector(onTap: _toggle, onDoubleTapDown: (d) { final w = MediaQuery.of(context).size.width; _onDoubleTap(d, d.globalPosition.dx > w / 2); }, onVerticalDragStart: _onDragStart, onVerticalDragUpdate: _onDragUpdate, child: Stack(children: [ Center(child: audioOnly ? const Icon(Icons.music_note, size: 120, color: Colors.white) : (c != null && c.value.isInitialized ? AspectRatio(aspectRatio: c.value.aspectRatio, child: VideoPlayer(c)) : const CircularProgressIndicator(color: Colors.white))), if (seekLabel.isNotEmpty) Center(child: Container(padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10), decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)), child: Text(seekLabel, style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold)))), if (showUI) ...[ Positioned(top: 0, left: 0, right: 0, child: Container(color: Colors.black45, padding: const EdgeInsets.fromLTRB(8, 28, 8, 8), child: Row(children: [IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white), onPressed: () => Navigator.pop(context)), Expanded(child: Text(current.name, style: TextStyle(color: Colors.white, fontSize: s.fontSize), maxLines: 1, overflow: TextOverflow.ellipsis)), IconButton(icon: Icon(locked ? Icons.lock : Icons.lock_open, color: Colors.white), onPressed: () => setState(() => locked = !locked))]))), Positioned(bottom: 0, left: 0, right: 0, child: Container(color: Colors.black54, padding: const EdgeInsets.all(10), child: Column(children: [ Slider(value: dur.inMilliseconds == 0 ? 0 : pos.inMilliseconds.clamp(0, dur.inMilliseconds).toDouble(), max: dur.inMilliseconds.toDouble() == 0 ? 1 : dur.inMilliseconds.toDouble(), onChanged: (v) => c?.seekTo(Duration(milliseconds: v.toInt())), activeColor: Colors.blue), Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(_fmt(pos), style: const TextStyle(color: Colors.white)), Text(_fmt(dur), style: const TextStyle(color: Colors.white))]), Row(mainAxisAlignment: MainAxisAlignment.center, children: [IconButton(icon: const Icon(Icons.skip_previous, color: Colors.white, size: 32), onPressed: _prev), IconButton(icon: Icon(playing ? Icons.pause : Icons.play_arrow, color: Colors.white, size: 42), onPressed: () => playing ? c?.pause() : c?.play()), IconButton(icon: const Icon(Icons.skip_next, color: Colors.white, size: 32), onPressed: _next)]) ]))) ] ])))); }
-          }
-          DART
-          grep -rn media_kit lib/ || echo NO_MEDIA_KIT_LEFT
-          rm -rf .dart_tool pubspec.lock
+          set -e
+          cd "${{ steps.prep.outputs.flutter_dir }}"
           flutter pub get
-      - name: Build SINGLE APK - arm64 only
-        run: |
-          cd MaxPlayer || cd .
-          flutter build apk --release --target-platform android-arm64
-      - name: Rename
-        run: |
-          mkdir -p output
-          cp MaxPlayer/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk output/MaxPlayer-Inova10-arm64.apk || cp build/app/outputs/flutter-apk/app-arm64-v8a-release.apk output/MaxPlayer-Inova10-arm64.apk
-          ls -lh output/
-      - name: Upload APK
+          flutter build apk --debug --target-platform android-arm64
+
+      - name: Upload 64-bit APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MaxPlayer-Inova10-APK
-          path: output/MaxPlayer-Inova10-arm64.apk
+          name: maxplayer-arm64-v8a-apk
+          path: "**/build/app/outputs/flutter-apk/app-debug.apk"
           if-no-files-found: error
