@@ -24,7 +24,56 @@ jobs:
         run: |
           if [ -f "MaxPlayer-NO-YML.zip" ]; then unzip -o MaxPlayer-NO-YML.zip; fi
           if [ -f "MaxPlayer.zip" ]; then unzip -o MaxPlayer.zip; fi
-          ls -R | head -n 100
+          ls -R | head -n 50
+      - name: FIX v1 embedding - regenerate Android folder with v2
+        run: |
+          cd MaxPlayer || cd .
+          echo "--- Regenerating android folder with Flutter 3.22 v2 embedding ---"
+          rm -rf android
+          flutter create --org com.maxplayer --project-name max_player_clone --platforms android .
+          cat > android/app/src/main/kotlin/com/maxplayer/clone/MainActivity.kt <<'KT'
+          package com.maxplayer.clone
+          import io.flutter.embedding.android.FlutterActivity
+          class MainActivity : FlutterActivity()
+          KT
+          cat > android/app/src/main/AndroidManifest.xml <<'XML'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+            <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+            <uses-permission android:name="android.permission.WAKE_LOCK"/>
+            <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+            <application android:label="Max Player" android:name="${applicationName}" android:icon="@mipmap/ic_launcher" android:supportsPictureInPicture="true">
+              <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:theme="@style/LaunchTheme" android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|screenLayout|uiMode" android:supportsPictureInPicture="true" android:hardwareAccelerated="true" android:windowSoftInputMode="adjustResize">
+                <meta-data android:name="io.flutter.embedding.android.NormalTheme" android:resource="@style/NormalTheme"/>
+                <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+                <intent-filter><action android:name="android.intent.action.VIEW"/><category android:name="android.intent.category.DEFAULT"/><data android:mimeType="video/*"/><data android:mimeType="audio/*"/></intent-filter>
+              </activity>
+              <meta-data android:name="flutterEmbedding" android:value="2"/>
+            </application>
+          </manifest>
+          XML
+          cat > android/app/build.gradle.kts <<'GRADLE'
+          plugins { id("com.android.application"); id("kotlin-android"); id("dev.flutter.flutter-gradle-plugin") }
+          android {
+              namespace = "com.maxplayer.clone"
+              compileSdk = 34
+              ndkVersion = "25.1.8937393"
+              defaultConfig {
+                  applicationId = "com.maxplayer.clone"
+                  minSdk = 21
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+                  ndk { abiFilters += listOf("arm64-v8a") }
+              }
+              buildTypes { release { signingConfig = signingConfigs.getByName("debug") } }
+          }
+          flutter { source = "../.." }
+          GRADLE
+          echo "--- Verify v2 ---"
+          cat android/app/src/main/kotlin/com/maxplayer/clone/MainActivity.kt
+          grep -r flutterEmbedding android/app/src/main/AndroidManifest.xml
       - name: Get packages
         run: |
           cd MaxPlayer || cd .
