@@ -23,19 +23,22 @@ jobs:
       - name: Unzip project if uploaded as ZIP
         run: |
           if [ -f "MaxPlayer-NO-YML.zip" ]; then unzip -o MaxPlayer-NO-YML.zip; fi
+          if [ -f "MaxPlayer-NO-YML-FIXED.zip" ]; then unzip -o MaxPlayer-NO-YML-FIXED.zip; fi
           if [ -f "MaxPlayer.zip" ]; then unzip -o MaxPlayer.zip; fi
           ls -R | head -n 50
       - name: FIX v1 embedding - regenerate Android folder with v2
         run: |
           cd MaxPlayer || cd .
-          echo "--- Regenerating android folder with Flutter 3.22 v2 embedding ---"
+          echo "--- Regenerating android folder ---"
           rm -rf android
           flutter create --org com.maxplayer --project-name max_player_clone --platforms android .
-          cat > android/app/src/main/kotlin/com/maxplayer/clone/MainActivity.kt <<'KT'
-          package com.maxplayer.clone
-          import io.flutter.embedding.android.FlutterActivity
-          class MainActivity : FlutterActivity()
-          KT
+          echo "--- Find real MainActivity path ---"
+          MAIN=$(find android/app/src/main -name "MainActivity.kt" | head -n 1)
+          echo "MainActivity at: $MAIN"
+          PKG=$(echo "$MAIN" | sed 's|android/app/src/main/kotlin/||; s|/MainActivity.kt||; s|/|.|g')
+          echo "Package is: $PKG"
+          printf 'package %s\nimport io.flutter.embedding.android.FlutterActivity\nclass MainActivity : FlutterActivity()\n' "$PKG" > "$MAIN"
+          cat "$MAIN"
           cat > android/app/src/main/AndroidManifest.xml <<'XML'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
             <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
@@ -53,26 +56,26 @@ jobs:
             </application>
           </manifest>
           XML
-          cat > android/app/build.gradle.kts <<'GRADLE'
-          plugins { id("com.android.application"); id("kotlin-android"); id("dev.flutter.flutter-gradle-plugin") }
+          rm -f android/app/build.gradle.kts android/settings.gradle.kts android/build.gradle.kts
+          cat > android/app/build.gradle <<'GRADLE'
+          plugins { id "com.android.application"; id "kotlin-android"; id "dev.flutter.flutter-gradle-plugin" }
           android {
-              namespace = "com.maxplayer.clone"
-              compileSdk = 34
-              ndkVersion = "25.1.8937393"
+              namespace = "com.maxplayer.max_player_clone"
+              compileSdk 34
+              ndkVersion "25.1.8937393"
               defaultConfig {
-                  applicationId = "com.maxplayer.clone"
-                  minSdk = 21
-                  targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
-                  ndk { abiFilters += listOf("arm64-v8a") }
+                  applicationId "com.maxplayer.max_player_clone"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+                  ndk { abiFilters "arm64-v8a" }
               }
-              buildTypes { release { signingConfig = signingConfigs.getByName("debug") } }
+              buildTypes { release { signingConfig signingConfigs.debug } }
           }
-          flutter { source = "../.." }
+          flutter { source "../.." }
           GRADLE
           echo "--- Verify v2 ---"
-          cat android/app/src/main/kotlin/com/maxplayer/clone/MainActivity.kt
           grep -r flutterEmbedding android/app/src/main/AndroidManifest.xml
       - name: Get packages
         run: |
